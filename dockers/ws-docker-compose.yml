@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  migrate:
+    image: nhatthanh020996/fastapi-swarm-webserver:v1
+    entrypoint: ["alembic", "upgrade", "head"]
+    env_file:
+      - ../.env
+    networks:
+      - dms_overlay_network
+
+  webserver:
+    image: nhatthanh020996/fastapi-swarm-webserver:v1
+    hostname: webserver
+    networks:
+      - dms_overlay_network
+    deploy:
+      replicas: 2
+      placement:
+        preferences:
+          - spread: node.hostname
+
+    volumes:
+      - 'webserver_logs:/code/logs'
+    env_file:
+      - ../.env
+
+  nginx:
+    image: docker.io/bitnami/nginx:1.25
+    hostname: nginx
+    ports:
+      - '80:8080'
+    depends_on:
+      - webserver
+    networks:
+      - dms_overlay_network
+    volumes:
+      - ./nginx.conf:/opt/bitnami/nginx/conf/nginx.conf:ro
+
+
+volumes:
+  webserver_logs:
+    name: webserver_logs
+    driver: local
+    driver_opts:
+      type: nfs4
+      o: addr=192.168.10.100,rw,soft
+      device: ":/webserver"
+
+
+networks:
+  dms_overlay_network:
+    external: true

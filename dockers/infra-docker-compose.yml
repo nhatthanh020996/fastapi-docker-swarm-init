@@ -1,0 +1,149 @@
+version: '3.8'
+
+x-postgres-common:
+  &postgres-common
+  image: postgres:14-alpine
+  user: postgres
+  healthcheck:
+    test: 'pg_isready -U admin@dgm --dbname=postgres'
+    interval: 10s
+    timeout: 5s
+    retries: 5
+
+
+services:
+  redis:
+    image: redis:6.2-alpine
+    hostname: redis
+    networks:
+      - dms_overlay_network
+    deploy:
+      placement:
+        constraints: [node.role == worker]
+    ports:
+      - '6379:6379'
+    command: redis-server --save 20 1 --loglevel warning --requirepass eYVX7EwVmmxKPCDmwMtyKVge8oLd2t81
+    volumes:
+      - 'redis_vol:/data'
+
+  postgres_primary:
+    <<: *postgres-common
+    ports:
+      - 5432:5432
+    networks:
+      - dms_overlay_network
+    deploy:
+      placement:
+        constraints: [node.id == 60vx6n5kqnq6gqolqnhssayur]
+
+    command: |
+      postgres 
+      -c wal_level=replica 
+      -c hot_standby=on 
+      -c max_wal_senders=10 
+      -c max_replication_slots=10 
+      -c hot_standby_feedback=on
+    volumes:
+      - ./00_init.sql:/docker-entrypoint-initdb.d/00_init.sql
+      - primary_postgres_vol:/var/lib/postgresql/data
+
+  postgres_replica:
+    <<: *postgres-common
+    ports:
+      - 5433:5432
+    networks:
+      - dms_overlay_network
+    deploy:
+      placement:
+        constraints: [node.role == worker]
+    env_file:
+      - .env
+    volumes:
+      - replica_postgres_vol:/var/lib/postgresql/data
+
+    command: |
+      bash -c "
+      rm -rf /var/lib/postgresql/data/*
+      until pg_basebackup --pgdata=/var/lib/postgresql/data -R --slot=replication_slot --host=postgres_primary --port=5432
+      do
+      echo 'Waiting for primary to connect...'
+      sleep 1s
+      done
+      echo 'Backup done, starting replica...'
+      chmod 0700 /var/lib/postgresql/data
+      postgres
+      "
+    depends_on:
+      - postgres_primary
+
+  pgbackups:
+    image: prodrigestivill/postgres-backup-local
+    networks:
+      - dms_overlay_network
+    user: postgres:postgres # Optional: see below
+    volumes:
+      - pgbackups_vol:/backups
+    env_file:
+      - .env
+
+  mongodb:
+    image: docker.io/bitnami/mongodb:7.0
+    hostname: mongodb
+    networks:
+      - dms_overlay_network
+    ports:
+      - "27019:27017"
+    volumes:
+      - 'mongodb_vol:/bitnami/mongodb'
+
+  migrate:
+    image: nhatthanh020996/fastapi-swarm-webserver:v1
+    entrypoint: ["alembic", "upgrade", "head"]
+    env_file:
+      - ../.env
+    networks:
+      - dms_overlay_network
+
+  nginx:
+    image: docker.io/bitnami/nginx:1.25
+    hostname: nginx
+    ports:
+      - '80:8080'
+    depends_on:
+      - webserver
+    networks:
+      - dms_overlay_network
+    volumes:
+      - ./nginx.conf:/opt/bitnami/nginx/conf/nginx.conf:ro
+
+
+volumes:
+  primary_postgres_vol:
+    name: primary_postgres_vol
+
+  replica_postgres_vol:
+    name: replica_postgres_vol
+
+  webserver_logs:
+    name: webserver_logs
+    driver: local
+    driver_opts:
+      type: nfs4
+      o: addr=192.168.10.100,rw,soft
+      device: ":/webserver"
+
+  redis_vol:
+    name: redis_vol
+
+  mongodb_vol:
+    name: mongodb_vol
+
+  pgbackups_vol:
+    name: pgbackups_vol
+
+
+networks:
+  dms_overlay_network:
+    driver: overlay
+    name: dms_overlay_network
+    attachable: true
