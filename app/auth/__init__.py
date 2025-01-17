@@ -1,0 +1,1 @@
+from .dependences import require_authentication, require_permission, get_user_id
